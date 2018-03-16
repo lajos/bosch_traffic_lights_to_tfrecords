@@ -14,8 +14,15 @@ from object_detection.utils import dataset_util
 import tensorflow as tf
 from tqdm import trange
 import glob
+from lxml import etree
+import sys
+import warnings
+
+if not sys.warnoptions:
+    warnings.simplefilter("ignore")
 
 labels = {}
+n_labels = {}
 
 def clamp(value):
   return max(min(value, 1), 0)
@@ -62,7 +69,7 @@ def create_boxed_tf_example(img, box_data):
         'image/width': dataset_util.int64_feature(width),
         'image/filename': dataset_util.bytes_feature(filename.encode('utf8')),
         'image/source_id': dataset_util.bytes_feature(filename.encode('utf8')),
-        'image/encoded': dataset_util.bytes_feature(encoded_image),
+        'image/encoded': dataset_util.bytes_feature(encoded_image_data),
         'image/format': dataset_util.bytes_feature(image_format),
         'image/object/bbox/xmin': dataset_util.float_list_feature(xmins),
         'image/object/bbox/xmax': dataset_util.float_list_feature(xmaxs),
@@ -73,21 +80,35 @@ def create_boxed_tf_example(img, box_data):
     }))
     return tf_example
 
-def create_boxed_tf_record(yaml_data, yaml_path, tfrecords_path, label_map_path, split_from=0., split_to=1., ignore_occluded=True):
-    global labels
+
+def add_label(label):
+    global labels, n_labels
+    if label not in labels.keys():
+        labels[label]=len(labels.values())+1
+
+    if label not in n_labels.keys():
+        n_labels[label] = 0
+
+    n_labels[label] += 1
+
+
+def add_from_yaml(yaml_path, writer, split_from=0., split_to=1., label_names=None ,ignore_occluded=True):
+    global labels, n_labels
+
+    print('adding images from yaml:', yaml_path)
+
+    with open(yaml_path,'r') as yaml_stream:
+        yaml_dirname = os.path.dirname(os.path.realpath(yaml_stream.name))
+        yaml_data = yaml.load(yaml_stream)
 
     n_yaml_data = len(yaml_data)
-    from_index = int(split_from * len(yaml_data))
-    to_index = int(split_to * len(yaml_data))
-
-    label_names=['Red', 'Green']
-
-    count = 0
+    from_index = int(split_from * n_yaml_data)
+    to_index = int(split_to * n_yaml_data)
 
     for i in trange(from_index, to_index):
         yaml_record = yaml_data[i]
 
-        img_path = os.path.join(yaml_path, yaml_record['path']).replace('.png','.jpg')
+        img_path = os.path.join(yaml_dirname, yaml_record['path']).replace('.png','.jpg')
         img = Image.open(img_path)
         width, height = img.size
 
@@ -111,8 +132,8 @@ def create_boxed_tf_record(yaml_data, yaml_path, tfrecords_path, label_map_path,
                 box_data['ymaxs'].append(clamp(float(box['y_max'])/height))
 
                 label = box['label']
-                if label not in labels.keys():
-                    labels[label]=len(labels.values())+1
+
+                add_label(label)
 
                 box_data['classes_text'].append(label.encode('utf8'))
                 box_data['classes'].append(labels[label])
@@ -126,9 +147,70 @@ def create_boxed_tf_record(yaml_data, yaml_path, tfrecords_path, label_map_path,
             tf_example = create_boxed_tf_example(img, box_data)
             if tf_example is not None:
                 writer.write(tf_example.SerializeToString())
-                count += 1
 
-    print('count:',count)
+
+def add_from_xml_dir(xml_dir, writer, label_names=None, split_from=0., split_to=1.):
+    global labels
+
+    print('adding images from xml dir:',xml_dir)
+
+    xml_files = glob.glob(os.path.join(xml_dir,'*.xml'))
+
+    n_xml_files = len(xml_files)
+    from_index = int(split_from * n_xml_files)
+    to_index = int(split_to * n_xml_files)
+
+    # print(n_xml_files, from_index, to_index)
+
+    for i in trange(from_index,to_index):
+        xml_path = xml_files[i]
+        xml_dirname = os.path.dirname(xml_path)
+
+        with tf.gfile.GFile(xml_path, 'r') as fid:
+            xml_str = fid.read()
+        xml = etree.fromstring(xml_str)
+        data = dataset_util.recursive_parse_xml_to_dict(xml)['annotation']
+
+        img_name = os.path.basename(data['path'].replace('\\','/'))
+        img_path = os.path.join(xml_dirname,img_name)
+        # print(img_name,img_path)
+        img = Image.open(img_path)
+
+        width, height = img.size
+
+        box_data = {'xmins':[],
+                    'xmaxs':[],
+                    'ymins':[],
+                    'ymaxs':[],
+                    'classes':[],
+                    'classes_text':[]}
+
+        for o in data['object']:
+            box = o['bndbox']
+            label = o['name']
+            if label_names is None or label in label_names:
+                if float(box['xmax'])-float(box['xmin']) <= MIN_BOX_WIDTH:
+                    continue
+                box_data['xmins'].append(clamp(float(box['xmin'])/width))
+                box_data['xmaxs'].append(clamp(float(box['xmax'])/width))
+                box_data['ymins'].append(clamp(float(box['ymin'])/height))
+                box_data['ymaxs'].append(clamp(float(box['ymax'])/height))
+
+                add_label(label)
+
+                box_data['classes_text'].append(label.encode('utf8'))
+                box_data['classes'].append(labels[label])
+
+            if not len(box_data['classes']):
+                continue
+
+        # print(box_data)
+
+        tf_example = create_boxed_tf_example(img, box_data)
+        if tf_example is not None:
+            writer.write(tf_example.SerializeToString())
+        # print(data)
+
 
 def write_label_map(label_map_path):
     global labels
@@ -144,36 +226,46 @@ def write_label_map(label_map_path):
             lm_file.write('}\n\n')
 
 
-def main2(yaml_filename, tfrecords_prefix_path, label_map_path):
-    with open(yaml_filename,'r') as yaml_stream:
-        yaml_path = os.path.dirname(os.path.realpath(yaml_stream.name))
-        yaml_data = yaml.load(yaml_stream)
-
-    create_boxed_tf_record(yaml_data, yaml_path, tfrecords_prefix_path+'_train.record', label_map_path, split_from=0., split_to=0.9)
-    create_boxed_tf_record(yaml_data, yaml_path, tfrecords_prefix_path+'_eval.record', label_map_path, split_from=0.9, split_to=1.)
-
-
-def add_from_xml_dir(xml_dir, writer, split_from, split_to):
-    xml_files = glob.glob(os.path.join(xml_dir,'*.xml'))
-
-    for i in trange(len(xml_files)):
-        xml_path = xml_files[i]
-        xml_dirname = os.path.dirname(xml_path)
+MIN_BOX_WIDTH = 14      # boxes smaller than this are ignored
 
 def main():
     tfrecords_train_path = 'train.record'       # train tfrecords output path
     tfrecords_eval_path = 'eval.record'         # eval tfrecords output path
     label_map_path = 'label_map.pbtxt'          # label map output path
-    train_split = 0.8                           # normalized percentage to use for train (rest is eval)
-    xml_dirs = ['../camera_images_labeled/1']
+    train_split = 0.9                           # split for train (rest is eval)
+    label_names = ['Red', 'Green']              # only write boxes with these labels
+    xml_dirs = ['../camera_images_labeled/1', '../traffic_light_images']
+    yaml_paths = ['../dataset_train/train.yaml']
 
-    # write train records
+    global n_labels
+
+    print('---- train records ----')
     split_from = 0
     split_to = train_split
     writer = tf.python_io.TFRecordWriter(tfrecords_train_path)
+    n_labels={}
     for xml_dir in xml_dirs:
-        add_from_xml_dir(xml_dir, writer, split_from, split_to)
+        add_from_xml_dir(xml_dir, writer, label_names=label_names, split_from=split_from, split_to=split_to)
+    for yaml_path in yaml_paths:
+        add_from_yaml(yaml_path, writer, label_names=label_names, split_from=split_from, split_to=split_to, ignore_occluded=True)
     writer.close()
+    print('train n_labels:',n_labels)
+    print('')
+
+
+    print('---- eval records ----')
+    split_from = train_split
+    split_to = 1
+    writer = tf.python_io.TFRecordWriter(tfrecords_eval_path)
+    n_labels={}
+    for xml_dir in xml_dirs:
+        add_from_xml_dir(xml_dir, writer, label_names=label_names, split_from=split_from, split_to=split_to)
+    for yaml_path in yaml_paths:
+        add_from_yaml(yaml_path, writer, label_names=label_names, split_from=split_from, split_to=split_to, ignore_occluded=True)
+    writer.close()
+    print('eval n_labels:',n_labels)
+    print('')
+
 
     global labels
     print('labels:',labels)
