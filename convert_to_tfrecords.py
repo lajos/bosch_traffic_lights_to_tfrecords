@@ -1,5 +1,7 @@
 #!/usr/bin/env python
-
+#
+# see configuration section in main() function
+#
 from __future__ import division
 from __future__ import print_function
 from __future__ import absolute_import
@@ -23,6 +25,7 @@ if not sys.warnoptions:
 
 labels = {}
 n_labels = {}
+MIN_BOX_WIDTH = 14
 
 def clamp(value):
   return max(min(value, 1), 0)
@@ -31,14 +34,9 @@ def create_boxed_tf_example(img, box_data):
     global labels
 
     width,height = img.size
-    # print('image shape:',width, height)
     image_format = b'jpg'
 
     filename = ''       # image data goes into tfrecord, no external file
-
-    # buffer = BytesIO()
-    # img.save(buffer,'jpeg')
-    # encoded_image_data = buffer.getvalue()
 
     try:
         buffer = BytesIO()
@@ -47,22 +45,12 @@ def create_boxed_tf_example(img, box_data):
     except:
         return None
 
-    # with tf.gfile.GFile(img_path, 'rb') as fid:
-    #     encoded_image = fid.read()
-    # encoded_image_data = BytesIO(encoded_image)
-
-    # img2 = Image.open(encoded_image_data)
-    # width,height = img2.size
-    # print('image shape:',width, height)
-
     xmins = box_data['xmins']
     xmaxs = box_data['xmaxs']
     ymins = box_data['ymins']
     ymaxs = box_data['ymaxs']
     classes_text = box_data['classes_text']
     classes = box_data['classes']
-
-    # print(box_data)
 
     tf_example = tf.train.Example(features=tf.train.Features(feature={
         'image/height': dataset_util.int64_feature(height),
@@ -141,9 +129,6 @@ def add_from_yaml(yaml_path, writer, split_from=0., split_to=1., label_names=Non
             if not len(box_data['classes']):
                 continue
 
-            # print(img_path)
-            # print(box_data)
-
             tf_example = create_boxed_tf_example(img, box_data)
             if tf_example is not None:
                 writer.write(tf_example.SerializeToString())
@@ -159,8 +144,6 @@ def add_from_xml_dir(xml_dir, writer, label_names=None, split_from=0., split_to=
     n_xml_files = len(xml_files)
     from_index = int(split_from * n_xml_files)
     to_index = int(split_to * n_xml_files)
-
-    # print(n_xml_files, from_index, to_index)
 
     for i in trange(from_index,to_index):
         xml_path = xml_files[i]
@@ -204,12 +187,9 @@ def add_from_xml_dir(xml_dir, writer, label_names=None, split_from=0., split_to=
             if not len(box_data['classes']):
                 continue
 
-        # print(box_data)
-
         tf_example = create_boxed_tf_example(img, box_data)
         if tf_example is not None:
             writer.write(tf_example.SerializeToString())
-        # print(data)
 
 
 def write_label_map(label_map_path):
@@ -226,18 +206,38 @@ def write_label_map(label_map_path):
             lm_file.write('}\n\n')
 
 
-MIN_BOX_WIDTH = 14      # boxes smaller than this are ignored
-
 def main():
+    # ---------------------------------------------------------------------------
+    #
+    # conversion settings
+    #
     tfrecords_train_path = 'train.record'       # train tfrecords output path
     tfrecords_eval_path = 'eval.record'         # eval tfrecords output path
     label_map_path = 'label_map.pbtxt'          # label map output path
-    train_split = 0.9                           # split for train (rest is eval)
-    label_names = ['Red', 'Green']              # only write boxes with these labels
-    xml_dirs = ['../camera_images_labeled/1', '../traffic_light_images']
-    yaml_paths = ['../dataset_train/train.yaml']
+    train_split = 0.94                          # split for train (rest is eval)
+    min_box_width = 14                          # boxes less wide are ignored
+    label_names = ['Red', 'Yellow', 'Green']    # only add boxes with these labels
+
+    # directory paths for PascalVOC xml files (for example output by https://github.com/tzutalin/labelImg)
+    # xml files should be in the same folder as images
+    #
+    # list of directory path strings, example:
+    # xml_dirs = ['../camera_images_labeled/1', '../traffic_light_images', '../udacity_succesful_light_detection']
+    #
+    xml_dirs=[]
+
+    # path to bosch tl data set yaml file (https://hci.iwr.uni-heidelberg.de/node/6132)
+    #
+    # list of path strings, example:
+    # yaml_paths = ['../dataset_train/train.yaml']
+    #
+    yaml_paths = []
+    #
+    # ---------------------------------------------------------------------------
 
     global n_labels
+    global MIN_BOX_WIDTH
+    MIN_BOX_WIDTH = min_box_width
 
     print('---- train records ----')
     split_from = 0
